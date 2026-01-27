@@ -8,9 +8,7 @@ from xgboost import XGBRanker
 import joblib
 
 
-# ----------------------------
 # Name normalization + fallback keys
-# ----------------------------
 _SUFFIX_RE = re.compile(r"\b(jr|sr|ii|iii|iv|v)\b\.?", flags=re.IGNORECASE)
 
 def norm_name(s: str) -> str:
@@ -19,7 +17,7 @@ def norm_name(s: str) -> str:
         return ""
     s = s.strip().lower()
 
-    # remove suffixes (jr, sr, ii, iii...)
+    # remove suffixes
     s = _SUFFIX_RE.sub("", s)
 
     # normalize punctuation
@@ -57,9 +55,8 @@ def pick_first_existing(df: pd.DataFrame, candidates):
     return None
 
 
-# ----------------------------
+
 # Ranking metrics
-# ----------------------------
 def ndcg_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int = 10) -> float:
     order = np.argsort(-y_score)
     rel = y_true[order][:k]
@@ -87,36 +84,55 @@ def mean_group_ndcg(model, df: pd.DataFrame, feature_cols, group_col: str, label
 
 
 def group_sizes(df: pd.DataFrame, group_col: str) -> np.ndarray:
-    # must be in same order as rows passed to fit()
     return df.groupby(group_col).size().to_numpy()
 
 
-# ----------------------------
+
 # Main pipeline
-# ----------------------------
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--college_csv", required=True)
-    parser.add_argument("--draft_xlsx", required=True)
-    parser.add_argument("--outdir", default="outputs_parent")
-    parser.add_argument("--k", type=int, default=10)
+    parser = argparse.ArgumentParser(description="NBA Draft Learning-to-Rank (Parent Paper reproduction)")
+
+    parser.add_argument(
+        "--college_csv",
+        default=r"C:\Users\Hp\Downloads\data\CollegeBasketballPlayers2009-2021.csv",
+        help="Path to college basketball CSV"
+    )
+    parser.add_argument(
+        "--draft_xlsx",
+        default=r"C:\Users\Hp\Downloads\data\DraftedPlayers2009-2021.xlsx",
+        help="Path to drafted players XLSX"
+    )
+    parser.add_argument(
+        "--outdir",
+        default=r"C:\Users\Hp\Downloads\outputs_parent",
+        help="Output directory"
+    )
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=10,
+        help="NDCG@k"
+    )
+
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # ----------------------------
+    
     # Load College CSV
-    # ----------------------------
+    if not os.path.exists(args.college_csv):
+        raise FileNotFoundError(f"College CSV not found: {args.college_csv}")
+    if not os.path.exists(args.draft_xlsx):
+        raise FileNotFoundError(f"Draft XLSX not found: {args.draft_xlsx}")
+
     college = pd.read_csv(args.college_csv, low_memory=False)
 
-    # Your file has: player_name, yr, ...
     name_col = pick_first_existing(college, ["player_name", "Player", "player", "PLAYER", "Name", "name"])
     yr_col   = pick_first_existing(college, ["yr", "Yr", "YR", "year", "Year", "Season", "season"])
 
     if name_col is None:
         raise ValueError(f"Could not find player name column in college CSV. Columns: {list(college.columns)[:40]}")
     if yr_col is None:
-        # not strictly needed for ranking (we group by draft year), so we won't hard fail
         print("WARNING: Could not find 'yr' column in college CSV. Continuing without it.")
         yr_col = None
 
@@ -124,12 +140,10 @@ def main():
     college["player_norm"] = college[name_col].astype(str).apply(norm_name)
     college["lf_key"] = college[name_col].astype(str).apply(last_first_initial_key)
 
-    # ----------------------------
+
     # Load Draft XLSX
-    # ----------------------------
     drafted = pd.read_excel(args.draft_xlsx)
 
-    # Your file columns: PLAYER, YEAR, OVERALL
     d_name = pick_first_existing(drafted, ["PLAYER", "Player", "player", "Name", "name"])
     d_year = pick_first_existing(drafted, ["YEAR", "Year", "year", "DraftYear", "draft_year"])
     d_pick = pick_first_existing(drafted, ["OVERALL", "Overall", "overall", "DraftPick", "draft_pick", "Pick", "pick"])
@@ -150,9 +164,8 @@ def main():
     drafted["draft_year"] = drafted["draft_year"].astype(int)
     drafted["draft_pick"] = drafted["draft_pick"].astype(int)
 
-    # ----------------------------
+
     # Diagnostics before merge
-    # ----------------------------
     print("=====================================")
     print("Diagnostics")
     print("College rows:", len(college), "| unique players:", college["player_norm"].nunique())
@@ -161,18 +174,16 @@ def main():
     print("Common exact-name matches:", len(common_exact))
     print("=====================================")
 
-    # ----------------------------
+
     # Merge strategy:
     # 1) Exact name match
-    # 2) If too small, fallback to last+first-initial key
-    # ----------------------------
+    # 2) Fallback: last+first-initial key if exact is small
     df = college.merge(
         drafted[["player_norm", "draft_year", "draft_pick"]],
         on="player_norm",
         how="inner"
     )
 
-    # If merge is suspiciously small, try fallback key merge
     if len(df) < 500:
         print(f"Exact merge produced only {len(df)} rows. Trying fallback merge (last name + first initial)...")
         df2 = college.merge(
@@ -180,8 +191,6 @@ def main():
             on="lf_key",
             how="inner"
         )
-
-        # Prefer fallback only if it improves a lot
         if len(df2) > len(df) * 2:
             df = df2.copy()
             print(f"Fallback merge successful: {len(df)} rows.")
@@ -189,69 +198,51 @@ def main():
             print(f"Fallback merge not much better ({len(df2)} rows). Keeping exact merge ({len(df)} rows).")
 
     if len(df) == 0:
-        raise ValueError(
-            "Merge produced 0 rows (no matching players). "
-            "This is usually a naming mismatch between datasets."
-        )
+        raise ValueError("Merge produced 0 rows (no matching players). Naming mismatch between datasets.")
 
-    # Keep 1 row per (player, draft_year).
-    # Your college 'yr' is year-in-school, not season year, so we do NOT compare to draft_year.
+    # Keep 1 row per (player, draft_year). 'yr' is year-in-school, NOT season year.
+    key_col = "player_norm" if "player_norm" in df.columns else "lf_key"
     if yr_col is not None:
-        # If yr is numeric-ish, take max; if it's strings (Fr/So/Jr/Sr), just keep last occurrence
-        try:
-            tmp = pd.to_numeric(df[yr_col], errors="coerce")
-            df["_yr_num"] = tmp
-            df = df.sort_values(["draft_year", "player_norm" if "player_norm" in df.columns else "lf_key", "_yr_num"])
-            df = df.groupby(["draft_year", "player_norm" if "player_norm" in df.columns else "lf_key"], as_index=False).tail(1)
-            df = df.drop(columns=["_yr_num"])
-        except Exception:
-            df = df.sort_values(["draft_year"])
-            df = df.groupby(["draft_year", "player_norm" if "player_norm" in df.columns else "lf_key"], as_index=False).tail(1)
+        tmp = pd.to_numeric(df[yr_col], errors="coerce")
+        df["_yr_num"] = tmp
+        df = df.sort_values(["draft_year", key_col, "_yr_num"])
+        df = df.groupby(["draft_year", key_col], as_index=False).tail(1)
+        df = df.drop(columns=["_yr_num"])
     else:
-        df = df.sort_values(["draft_year"])
-        df = df.groupby(["draft_year", "player_norm" if "player_norm" in df.columns else "lf_key"], as_index=False).tail(1)
+        df = df.sort_values(["draft_year", key_col])
+        df = df.groupby(["draft_year", key_col], as_index=False).tail(1)
 
-    # ----------------------------
+    
     # Build relevance labels for Learning-to-Rank
     # Higher relevance = better (lower draft_pick)
-    # Make integer labels 0..31 (safe for ndcg)
-    # ----------------------------
     df["max_pick"] = df.groupby("draft_year")["draft_pick"].transform("max")
     denom = (df["max_pick"] - 1).replace(0, 1)
     df["relevance"] = (31 - np.floor(31 * (df["draft_pick"] - 1) / denom)).astype(int)
 
-    # ----------------------------
+    
     # Feature columns: numeric only
-    # ----------------------------
-    exclude = {"draft_year", "draft_pick", "relevance", "max_pick"}
-    if "player_norm" in df.columns:
-        exclude.add("player_norm")
-    if "lf_key" in df.columns:
-        exclude.add("lf_key")
-
+    exclude = {"draft_year", "draft_pick", "relevance", "max_pick", "player_norm", "lf_key"}
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     feature_cols = [c for c in numeric_cols if c not in exclude]
 
     if not feature_cols:
         raise ValueError("No numeric feature columns found after filtering.")
 
-    # ----------------------------
+
     # Train/Test/Validation split by draft_year (70/20/10)
-    # ----------------------------
     years = df["draft_year"].unique()
     if len(years) < 3:
         raise ValueError(f"Not enough draft_year groups ({len(years)}) to create train/test/val splits.")
 
     train_years, temp_years = train_test_split(years, test_size=0.30, random_state=42)
-    test_years, val_years = train_test_split(temp_years, test_size=1/3, random_state=42)  # 20% / 10%
+    test_years, val_years = train_test_split(temp_years, test_size=1/3, random_state=42)
 
     train_df = df[df["draft_year"].isin(train_years)].sort_values("draft_year").reset_index(drop=True)
     test_df  = df[df["draft_year"].isin(test_years)].sort_values("draft_year").reset_index(drop=True)
     val_df   = df[df["draft_year"].isin(val_years)].sort_values("draft_year").reset_index(drop=True)
 
-    # ----------------------------
+
     # Impute missing feature values using TRAIN medians
-    # ----------------------------
     medians = {}
     for c in feature_cols:
         med = float(train_df[c].median()) if train_df[c].notna().any() else 0.0
@@ -260,9 +251,8 @@ def main():
         test_df[c]  = test_df[c].fillna(med)
         val_df[c]   = val_df[c].fillna(med)
 
-    # ----------------------------
+    
     # Train XGBoost Ranker
-    # ----------------------------
     X_train = train_df[feature_cols].to_numpy()
     y_train = train_df["relevance"].to_numpy()
     g_train = group_sizes(train_df, "draft_year")
@@ -293,9 +283,8 @@ def main():
         verbose=False
     )
 
-    # ----------------------------
+
     # Evaluate
-    # ----------------------------
     test_ndcg = mean_group_ndcg(model, test_df, feature_cols, "draft_year", "relevance", args.k)
     val_ndcg  = mean_group_ndcg(model, val_df, feature_cols, "draft_year", "relevance", args.k)
 
@@ -310,10 +299,8 @@ def main():
     print(f"Val  mean NDCG@{args.k}: {val_ndcg:.4f}")
     print("=====================================")
 
-    # ----------------------------
+    
     # Save outputs
-    # ----------------------------
-    os.makedirs(args.outdir, exist_ok=True)
     joblib.dump(model, os.path.join(args.outdir, "xgb_ranker.joblib"))
     pd.Series(feature_cols).to_csv(os.path.join(args.outdir, "feature_cols.csv"), index=False)
     pd.Series(medians).to_csv(os.path.join(args.outdir, "train_medians.csv"))
