@@ -1,0 +1,7 @@
+Model,Features Used,Target,R2,RMSE,MAE
+Linear Regression,Player Only,PTS_vs_SeasonAvg,0.5272,4.2505,3.2063
+Random Forest,Player Only,PTS_vs_SeasonAvg,-0.1945,6.7562,5.2691
+Gradient Boosting,Player Only,PTS_vs_SeasonAvg,-0.5491,7.6939,5.7483
+Linear Regression,Player + Matchup Difficulty,PTS_vs_SeasonAvg,0.4943,4.3962,3.183
+Random Forest,Player + Matchup Difficulty,PTS_vs_SeasonAvg,-0.0143,6.2256,4.8189
+Gradient Boosting,Player + Matchup Difficulty,PTS_vs_SeasonAvg,-0.4294,7.3907,5.9733
