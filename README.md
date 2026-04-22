@@ -1,2 +1,3 @@
 # DS340W
-Predicting NBA Draft Rankings with Machine Learning
+Opponent-Aware NBA Player Performance Prediction Using Matchup Difficulty
+
