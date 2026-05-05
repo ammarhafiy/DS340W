@@ -49,12 +49,6 @@ The final datasets include player performance statistics, opponent defensive sta
 
 ---
 
-## Install Required Python Packages
-
-Before running the code, install the required Python packages. Run this command first:
-
-```bash
-pip install pandas numpy scikit-learn nba_api
 ## Files in This Repository
 
 ### Data Files
